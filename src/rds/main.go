@@ -21,10 +21,15 @@ func main() {
 
 	//r.Run(":8081")
 
-	err := downloadDB()
+	rules, err := downloadDB()
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	acts := rules.FindActions(",libcurl,", "linux", "debian", "9", "amd64")
+	log.Printf("Acts: %v", acts)
+
+	log.Printf("Rules: %+v", rules)
 }
 
 var depRE = regexp.MustCompile(`/deps/.*\.json$`)
@@ -56,18 +61,73 @@ type rule struct {
 	Dependencies []dependency `json:"dependencies"`
 }
 
-func downloadDB() error {
+type ruleset []rule
+
+type action struct {
+	SystemPkg []string
+	Scripts   []string
+}
+
+func (rs ruleset) FindActions(sysreqs, os, flavor, version, arch string) []action {
+	acts := make([]action, 0)
+
+	for _, r := range rs {
+		// TODO: cache this
+		re, err := regexp.Compile("(?i)" + r.Regexp)
+		if err != nil {
+			log.Printf("Ignoring invalid regular expression for rule: %s", r.Regexp)
+			break
+		}
+
+		if !re.MatchString(sysreqs) {
+			// No match, no need to further evaluate.
+			log.Printf("No re match: %s on '%v'", sysreqs, r.Regexp)
+			continue
+		}
+
+		for _, d := range r.Dependencies {
+			for _, sc := range d.SysConstraints {
+				if sc.Arch != "" && arch != "" && sc.Arch != arch {
+					continue
+				}
+				if sc.Flavor != "" && flavor != "" && sc.Flavor != flavor {
+					continue
+				}
+				/*if sc.Version != "" && version != "" && sc.Version != version {
+					continue
+				}*/
+				if sc.OS != "" && os != "" && sc.OS != os {
+					continue
+				}
+
+				// We have a match! Apply it
+				act := action{
+					d.SysPkgs,
+					d.Scripts,
+				}
+				acts = append(acts, act)
+
+				// We don't need to evaluate any more of the sysConstraints, we already matched.
+				break
+			}
+		}
+	}
+
+	return acts
+}
+
+func downloadDB() (ruleset, error) {
 	url := "https://github.com/trestletech/rdeps/archive/master.tar.gz"
 	res, err := http.Get(url)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	deps := make([]rule, 0)
 
 	gz, err := gzip.NewReader(res.Body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	tr := tar.NewReader(gz)
@@ -76,11 +136,10 @@ func downloadDB() error {
 		if err == io.EOF {
 			break
 		} else if err != nil {
-			return err
+			return nil, err
 		}
 
 		if header.Typeflag == tar.TypeReg && depRE.MatchString(header.Name) {
-			log.Println("\tis a dep!")
 			// dependency file
 			dec := json.NewDecoder(tr)
 			var dep rule
@@ -90,6 +149,5 @@ func downloadDB() error {
 		}
 	}
 
-	log.Printf("Deps: %+v", deps)
-	return nil
+	return deps, nil
 }
